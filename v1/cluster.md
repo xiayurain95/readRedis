@@ -30,11 +30,11 @@ clusterLink *createClusterLink(clusterNode *node) {
 
 clusterProcessPacket
 -- 
-- 这个函数可能是真正的处理逻辑的函数块
+- 这个函数是处理文件事件的主要函数
 - 首先，从ev专属的缓存里面读取数据，redis前面8个字节定义了一些消息数据信息（消息头）
   - 4字节的MSS真的是经典操作哟 
   - 信息包头组织方案，在下面，在socket进行读的时候，**分为两个逻辑阶段进行**，首先要先读取消息头部，固定的长度，8个字节，然后再根据MSS，计算还需要读多少，是不是读完了，之类的
-    - 原因！！！由于TCP是面向流的协议，但是read返回为0其实是EOF的时候，所以不能读取太多了，免得。。。引发阻塞什么的orz（好吧，**原来是read原语引发的阻塞吗**，今天才想到哟）
+    - 原因！！！由于TCP是面向流的协议，但是read返回为0其实是EOF的时候，所以不能读取太多了，免得。。。引发阻塞什么的orz（好吧，**原来是read原语引发的阻塞吗**，今天才想到哟）(其实可以使用fcntl操作F_NONBLOCK实现异步的读写)
     ```C
       // 消息的长度
       uint32_t totlen = ntohl(hdr->totlen);
@@ -46,7 +46,7 @@ clusterProcessPacket
       uint16_t flags = ntohs(hdr->flags);
     ```
 - 然后当然是对消息进行匹配鸭
-  - 当前支持的消息种类众多，基本有以下的品种
+  - 当前支持的消息种类众多，基本有以下的品种(下面注释)
   - 与之前sentinel最大的区别是，这里其实都是通过这个函数实现的集群之间的通信的，而sentinel是通过hello信道进行相互通信的（通过hello行到有一个好处，就是一台主机master为单位，进行的同学）
   - 使用套接字直接通信是因为。。。就一个集群啊，又不是有很多集群在。。。
   - 是的，这个地方其实就是处理clusterMSG信息的大中心，写成了一个。。。if else的样子（其实感觉封装性不是很好，之后可能有重构什么的吧）
@@ -73,12 +73,13 @@ clusterProcessPacket
 
 1. 首先是meet和ping 
     - meet 没啥可说的，新建一个描述struct，然后填充ip port，加入豪华午餐list
+      - 加入list并不代表就连接上了,之后会有函数对list中的每一个LINK进行检测,检测后对其进行连接
       - meet是客户端发送给主机的一个命令,所以他的本质是让主机连接给定的一个ip:port,所以是需要一系列的handshake的(以handshake状态加入到list里面)(之后是cron解决吧) 
     - ping pong meet 是符合嘴碎协议的（gossip），对对应的gossip进行处理
-    1. 不认识这个节点（在dict里面没有查到），直接用Handshake函数来简建立连接握爪
-      - **handshake的说法好奇怪，，，好奇怪好奇怪，直接加到dict里面就直接说之后会handshake了。。。为啥哟，有cron吗？？？** 
+    1. 不认识这个节点（在dict里面没有查到），直接用Handshake函数来简建立连接握爪(HANDSHAKE本质上是没有建立连接的,只是将对应的连接生成放到link的list里面)
+      - **handshake其实只是简单的把对应的参数设置好放到node的dict之中,等待Cron对连接质量检测时统一进行连接** 
       - 知道了，这里主要是有一个flag，在创建这个节点的时候有一个  createClusterNode(NULL,REDIS_NODE_HANDSHAKE)，也就是handshake的标志吧,**具体是主要的,我们handshake一个节点,主要是通过PING和MEET来的,MEET是人手动指定的,PING是程序自动的,当发现不认识这个节点的时候,三次握手开始了,有两种!!!!!!方案:1. MEET PONG PING 2. PING PONG PING就会建立一个握手的关系** 
-    2. 看一下嘴碎协议,嘴碎协议有啥好的呢，每次收到gossip，首先解包获取节点信息
+    1. 看一下嘴碎协议,嘴碎协议有啥好的呢，每次收到gossip，首先解包获取节点信息
       - **可以得到已知节点在发送gossip信息节点看来的状态信息**
       1. 发送gossip的节点觉得它已经GG了
          - 是否已经GG的信息
@@ -87,25 +88,27 @@ clusterProcessPacket
            - 使用函数markNodeAsFailingIfNeeded来认领这个状态
            - 要求在当前主机对该节点的测度为PFAIL状态的时候,验证是否为FAIL状态(主观下线与客观下线的分野)
            - 一旦到达PFAIL状态的时候进行广播消息,这里抵达的是一种最终一致性的状态
+           - 注意:FAIL状态是由gossip协议被动传播收敛的PFAIL是主动广播收敛的(和sentinel有重大的区别,sentinel的主要作用是检测master的变化,通过__HELLO__实现快速收敛)
       2. 发现之前GG的现在好像康复了,直接在list里面移除当前这个sender的假消息
       3. **发现了吗,其实我们对某一个节点失效的度量建立在有消息发送过来的情况下,也就是说,是gossip触发的一种失效度量,因此,gossip的数量是一种重要的参数-----收敛速度的标准**
       4. 当前节点认为这个节点down了,但是发现发送过来的消息说他的ip和port变化了,直接重新handshake吧
-    3. 不认识这个节点直接handshake
+    2. 不认识这个节点直接handshake
 2. 这是一条 PING 、 PONG 或者 MEET 消息,处理config(超级长的代码...)
   1. 发现认识当前的节点,并且这是一条handshake的回复(就是PING或者PONG类型的回复)(上面有写具体内容),就是说handshake已经结束了,把多余的其他信息加到当前节点里面去,能发送pingPONG应该是连接已经建立好了,更新一下当前节点对sender的认知(修改状态啊(现在不在handshake状态了,这位的名字是啥,端口是啥,是master还是slave什么的)),然后...没有然后了
   2. 然后是PING PONG了(不在handshake状态的),ping直接就是传递一下端口啊,地址啊,有没有变化什么的.PONG主要是对本节点来说的,
      - 首先是更新各种时钟,比如发送ping的间隔时间清零了啊,再比如,当前回复PONG的时间(为了fail和pfail)
-     - 更新fail和pfail,pfail一定要更新,因为这个是客观下线,fail根据情况(主观下线,看一下现在满足主观上线的要求不)调用函数clearNodeFailureIfNeeded
+     - 更新fail和pfail,pfail一定要更新,因为这个是客观下线,fail根据情况(主观下线,看一下现在满足主观上线的要求不)调用函数`clearNodeFailureIfNeeded`(之前认为主观下线的主机可以在这个地方取消主观下线的标志)
+       - 实现实际的PFAIL其实是在cron之中进行检查的
        - 从节点nobody cares,主节点大家都care:发现fail之后会立即开始failover,但是failover是需要时间的,如果发现failover没有结束,直接标记上线吧(使用槽标记)(其他节点怎么办哟(leader呢???))**现在觉得存疑诶** 
-     - 由于raft协议进行保活,只能保证最终一致性,所以!!!要被动更新诶,这里处理一些乱七八糟的被动更新的东西,比如,1.master变成slave了(变更master的属性,把slave名单清空一下~把已经指派的槽删除了(估计是failover指派新的槽(槽的信息怎么更新了))),2.slave变成master了(简单的...设置一下就完毕了~~)3.当前sender是个slave,但是它的master发生变化了
-     - 现在可以回复一下之前的问题:槽指派的信息在发现这个是一个PING PONG MEET信息的时候,会自动的检查一回 **也就是说在每一次主从信息发生变更的时候,立即的更新一下槽的指派信息(免得出问题)**,在之后还有一个原因,是必须要先变更主节点诶,免得...出现一些奇奇怪怪的问题~~(就是在主节点变更之后再指派槽信息),首先算一下dirty_slots的数目啥的(在发送报文的时候,会把当前的槽指派一起发送过去的)
-       - 发送的规则是主要的,自己是master,就发自己的槽指派,自己是slave发送自己master的槽指派.
+     - 由于raft协议进行保活,只能保证最终一致性,所以!!!有时候出现网络分区问题,需要对落后节点进行被动更新,这里处理一些乱七八糟的被动更新的东西,比如,1.master变成slave了(变更master的属性,把slave名单清空一下~把已经指派的槽删除了(估计是failover指派新的槽(槽的信息怎么更新了))),2.slave变成master了(简单的...设置一下就完毕了~~)3.当前sender是个slave,但是它的master发生变化了(在cluster模式之中有孤节点支援功能)
+     - PING PONG MEET信息会跟随发送当前节点的槽指派信息,报文接收方会自动的检查一回槽指派信息 **也就是说在每一次主从信息可能发生变更的时候,立即的更新一下槽的指派信息(免得出问题)**,在之后还有一个原因,是必须要先变更主节点诶,免得...出现一些奇奇怪怪的问题~~(就是在主节点变更之后再指派槽信息),首先算一下dirty_slots的数目啥的(在发送报文的时候,会把当前的槽指派一起发送过去的)
+       - 槽指派信息的发送规则:1. 自己是master,就发自己的槽指派 2. 自己是slave发送自己master的槽指派.
        - 这里进行dirty_slots的运算也是按照这种方式的.发森了变化之后调用一下clusterUpdateSlotsConfigWith函数来更新一下槽指派信息(需要sender是master)
          - 这个函数干啥了?直接的修改当前的槽指派(就是算一下bitmap之类的,修改对应表项)
          - 处理failover时下线之后重新上线的情况(自己下线了然后再重新上限)-------raft状态机出现了,有一个参数叫configEpoch,它更大的话表明当前已经有过一次failover,当发现当前的slot被剥夺给sender之后,我们就知道:自己(master)或者自己(slave)的master GG过一次,进行对应的权限转换(认贼作父),原来是master的自己权限降低了(被拔得一毛(slots)不剩,还能干嘛哟)
        - 在上一个函数中我们处理了一下自己主动的下线的情况,现在我们来谈一下对端的下线情况(两种情况从本质上都是一种网络的分割)
        - 来看一下我们亲爱的slots的定义(在存储的时候,slots 直接存储为当前的一个列表指针),在发送slot信息的时候,我们只会发自己分配到的slots,因此是直接使用一个bitmap,这样的速度会快很多,而且流量不大(在内部也会保存一个bitmap)
-       ```C
+        ```C
         // 负责处理各个槽的节点
         // 例如 slots[i] = clusterNode_A 表示槽 i 由节点 A 处理
         clusterNode *slots[REDIS_CLUSTER_SLOTS];
