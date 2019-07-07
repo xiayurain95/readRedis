@@ -1,10 +1,20 @@
 redis CLuster
 --
-- 首先,这里面主要的函数有这几个:init(负责初始化,顺便发动一下事件处理引擎).cron定时序列(负责pingpong啥的).还有一个可爱的终端(负责请求啥的,在代码的最后一部分上),还有replication(负责主从的同步操作啥的)
-- 首先 看一下这个的主要入口在什么位置，在redis.c的main（）函数里面。调用了initServer（）函数，里面有一只这个：clusterInit（），恭喜你找到cluster的入口函数了
-- 也有一个时间定期函数哟clusterCron,在redis内部被ServiceCron定期调用一次
-- 在clusterInit函数中，会生成一个套接字，这个套接字会注册到eventloop作为文件事件，对这个监听的套接字做的处理的clusterAcceptHandler
-- 针对这个套接字的文件描述符，使用了一个叫做clusterLink的结构体进行包裹，主要是把发送以及接收的信息进行缓冲？
+- 首先,主要函数:
+  1. init(负责初始化,初始化事件处理引擎,注册监听事件(Listen)的回调函数,)
+  2. cron定时触发事件(负责pingpong监听当前cluster状态).
+  3. 一个可爱的终端(位于代码最后一部分,负责构成伪终端,像peer节点发送命令)
+  4. 调用了replication(负责主从的同步操作啥的psync,与sync支持)
+
+- 检查cluster函数入口，在redis.c中可以发现调用链`main`--->`initServer`--->`clusterInit`，cluster的入口函数为本函数
+  - 本函数作为文件事件处理函数入口
+- 也有一个时间定期函数`clusterCron`,在redis内部被ServiceCron定期调用一次
+  - 本函数作为事件处理函数入口
+
+- `clusterInit`函数主要作用，生成一个Listen套接字注册到eventloop作为文件事件，注册回调函数(注:当有连接到来时,Listen会产生一个readable事件,回调函数可以进行accept实现...非阻塞)`clusterAcceptHandler`,当对连接进行accept
+  - accept之后不是获得的新套接字，注册回调函数`clusterReadHandler`到事件循环中,回调函数调用链:`clusterReadHandler`---->`clusterProcessPacket`(处理对端发送数据包)
+  
+- 针对这个套接字的文件描述符，使用了一个叫做clusterLink的结构体进行包裹，主要是把发送以及接收的信息进行缓冲
   - 貌似也没有对这个link做啥统一的存储，貌似只是一个单纯的privateData。用来给eventLoop使用的感觉 （ev的专属缓冲区）
 ```C
 clusterLink *createClusterLink(clusterNode *node) {
@@ -17,11 +27,6 @@ clusterLink *createClusterLink(clusterNode *node) {
     return link;
 }
 ```
-    - 这个函数主要是用在当这个套接字为可读的情况下，（应该是有connect函数冒出来），对这个函数进行accept
-    - accept之后不是获得了一个新的套接字嘛，继续注册到事件循环里面去
-      - 这个事件现在叫clusterReadHandler
-      - 这个时间callback调用了这个函数：clusterProcessPacket
-
 
 clusterProcessPacket
 -- 
@@ -73,7 +78,7 @@ clusterProcessPacket
     1. 不认识这个节点（在dict里面没有查到），直接用Handshake函数来简建立连接握爪
       - **handshake的说法好奇怪，，，好奇怪好奇怪，直接加到dict里面就直接说之后会handshake了。。。为啥哟，有cron吗？？？** 
       - 知道了，这里主要是有一个flag，在创建这个节点的时候有一个  createClusterNode(NULL,REDIS_NODE_HANDSHAKE)，也就是handshake的标志吧,**具体是主要的,我们handshake一个节点,主要是通过PING和MEET来的,MEET是人手动指定的,PING是程序自动的,当发现不认识这个节点的时候,三次握手开始了,有两种!!!!!!方案:1. MEET PONG PING 2. PING PONG PING就会建立一个握手的关系** 
-    1. 看一下嘴碎协议,嘴碎协议有啥好的呢，每次收到gossip，首先解包获取节点信息
+    2. 看一下嘴碎协议,嘴碎协议有啥好的呢，每次收到gossip，首先解包获取节点信息
       - **可以得到已知节点在发送gossip信息节点看来的状态信息**
       1. 发送gossip的节点觉得它已经GG了
          - 是否已经GG的信息
