@@ -1,9 +1,12 @@
-这个是eventLoop全家桶的设计
-- eventLoop算是redis的事务核心部分了
-  - 所有的事务基本都是在这里面，它的主函数aeMain是redis主函数的循环，这个循环退出就进入了redis的退出机制了
-  - eventloop还注册了一个beforesleep函数，这个函数可能就是Cron(不是这样的)
-    - 是键值检查，replica和一些啥aof，rdb的东西的处理 
-  - eventLoop的事件主要分两种类型，一种是文件事件，一种是时间事件，redis不是像epool一样只有文件事件什么的
+Redis中的eventLoop
+=
+- eventLoop是redis的事务核心部分了
+  - 主要分两部分:
+    1. 文件世间部分,由于IO操作本质上很容易产生阻塞,对大部分文件事件进行抽象,使用epoll实现文件事件的非阻塞(O_NONBLOCK)
+    2. 时间事件,时间事件本质上对于当前的任务是异步的(不知道在何时会产生对应的事件),因此也对时间事件进行抽象,在v3.1版本中只有一个timer时间进行PING PONG等定时事务
+  - 所有的事务基本都是在这里面，它的主函数aeMain是redis主函数的循环的一部分，这个主函数的循环退出redis也就退出了
+  - eventloop注册了一个beforesleep函数，这个函数在每次调用epoll_wait之前进行调用,在进入sleep之前完成一部分的事务操作
+    - 是键值检查，replica和一些啥aof，rdb的东西的处理
 
 eaMain
 - 没啥好说的，先执行beforeSleep然后再是aeProcessEvents
@@ -70,7 +73,7 @@ aeProcessEvents
     struct aeTimeEvent *next;
 
     } aeTimeEvent;
-    ```he
+    ```
     - 不断的遍历这个链表，调用上面的时间处理callback函数，实现我们对时间序列的操作（timeProc函数）
     - 时间时间有一个id 主要的目的其实是定位对应的时间事件，可以进行移除操作
     - 时间事件的加入时间操作，当超过对应的时间之后，才会对某一个时间事件进行处理，首先是秒，然后是毫秒时间，可以使用函数对时间进行操作
