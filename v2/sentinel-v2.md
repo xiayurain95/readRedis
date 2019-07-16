@@ -9,6 +9,29 @@ epoch
 ==
 - sentinel在实现的时候,其实epoch还是比较复杂的,定义了太多的epoch...然后也复用了部分epoch,比较...难以揣摩究竟是啥意思~~
 - 在sentinel中有各种的epoch,本质上还是为了实现一个raft状态机的作用的.其中`failover_epoch`是唯一一个可以单增的epoch,`current_epoch`会在`voteLeader`这个函数里面检测当前的epoch能否支持更改数据(其实就是term的作用啦,更大的term可以更改数据的)并且实现被动的增加.
+```
+                        (传播获得当前的epoch的值,
+                        当比failover_epoch小的时候更新,
+                        并且会记录对应的投票方向于
+                        本sentinel的leader_epoch中)
+                        (唯一做比较的字段),
+                        相同时发送当前leader_epoch,
+                        更高时更新leader_epoch,
+                        更小时拒绝 
+                         
+                          ->current_epoch
+ ____                    /            
+|    | +1(当发现客观下线) /           
+|    v                /(广播is_master_down_by_addr)
+|    failover_epoch
+|    |               \
+ ____                 \
+                        ->leader_epoch
+
+                        (使用__HELLO__信道进行通信
+                        获取其他sentinel的投票),
+                        实现 n/2+1 leader选举
+ ```
 - `sentinelRedisInstance`中有的各种花式的epoch : `config_epoch` , `leader_epoch`, `failover_epoch`
   - 在redis里面,其他的sentinel也是在内部标识为一个`sentinelRedisInstance`对象
   - 在这个地方,一定要注意在sentinel的内部标识里面,其他的sentinel本质上也是一个sentinelRedisInstance,因此,在rsi表示的对象不一样时(sentinel或者master),有一定可能出现字段复用(同一个字段在不同时候表明的含义不一样)(其实复用一个字段节省不了多少...还容易难理解诶~~):`leader_epoch`是不幸被复用的字段,在master和sentinel对象(rsi)作用完全不一样~
